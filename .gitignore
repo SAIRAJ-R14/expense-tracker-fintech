@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Django
+*.log
+db.sqlite3
+media/
+staticfiles/
+.env
+
+# Node/frontend
+node_modules/
+dist/
+build/
+.parcel-cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local uploads and exports
+*.xlsx
+*.csv
+*.pdf
+!backend/database_setup.sql
