@@ -1,6 +1,7 @@
 const { useEffect, useMemo, useRef, useState } = React;
 
 const STORE_KEY = "smartExpenseState.v1";
+const API_BASE = "http://127.0.0.1:8000/api";
 const categories = ["Food", "Grocery", "Rent", "Shopping", "Fuel", "Transport", "Entertainment", "Healthcare", "Education", "Investment", "EMI", "Insurance", "Travel", "Others"];
 const paymentMethods = ["Cash", "Debit Card", "Credit Card", "UPI", "Bank Transfer", "Wallet"];
 const currencies = ["INR", "USD", "EUR", "GBP", "AED", "SGD"];
@@ -37,6 +38,82 @@ function saveState(state) {
   localStorage.setItem(STORE_KEY, JSON.stringify(state));
 }
 
+async function apiRequest(path, options = {}, token) {
+  const headers = { ...(options.headers || {}) };
+  if (!(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!response.ok) throw new Error(JSON.stringify(data));
+  return data;
+}
+
+function apiUserToLocal(user) {
+  const profile = user.profile || {};
+  return {
+    id: user.id,
+    fullName: `${user.first_name || ""} ${user.last_name || ""}`.trim() || user.username,
+    username: user.username,
+    email: user.email,
+    phone: user.phone_number,
+    country: user.country,
+    currency: user.currency || profile.preferred_currency || "INR",
+    monthlySalary: profile.monthly_salary || "",
+    salaryDate: profile.salary_credit_date || todayISO(),
+    monthlyBudget: profile.monthly_budget || "",
+    dailyBudget: profile.daily_budget || "",
+    savingsGoal: profile.savings_goal || "",
+    preferredCurrency: profile.preferred_currency || user.currency || "INR",
+    defaultPayment: profile.default_payment_method || "UPI",
+    financialGoal: profile.financial_goal || "",
+    profileComplete: Boolean(profile.profile_complete),
+    blocked: user.is_blocked
+  };
+}
+
+function incomeFromApi(item) {
+  return {
+    id: item.id,
+    userId: item.user,
+    source: item.income_source,
+    amount: Number(item.amount),
+    date: item.date,
+    payment: item.payment_method_name || "",
+    description: item.description || "",
+    attachment: item.attachment || ""
+  };
+}
+
+function expenseFromApi(item) {
+  return {
+    id: item.id,
+    userId: item.user,
+    amount: Number(item.amount),
+    category: item.category_name || item.category || "Others",
+    subCategory: item.sub_category_name || "",
+    date: item.date,
+    time: item.time,
+    payment: item.payment_method_name || "",
+    merchant: item.merchant_name || "",
+    notes: item.notes || "",
+    receipt: item.receipt || "",
+    location: item.location || ""
+  };
+}
+
+function budgetFromApi(item) {
+  return { id: item.id, userId: item.user, type: item.period, category: item.category_name || "All", amount: Number(item.amount) };
+}
+
+function goalFromApi(item) {
+  return { id: item.id, userId: item.user, name: item.goal_name, target: Number(item.target_amount), current: Number(item.current_saved_amount), deadline: item.deadline, priority: item.priority };
+}
+
+function billFromApi(item) {
+  return { id: item.id, userId: item.user, name: item.bill_name, amount: Number(item.amount), dueDate: item.due_date, remindBefore: item.reminder_days_before_due_date };
+}
+
 function hashPassword(value) {
   return btoa(unescape(encodeURIComponent(value))).split("").reverse().join("");
 }
@@ -68,6 +145,37 @@ function App() {
   }, [state.theme]);
 
   const patchState = (patcher) => setState((prev) => typeof patcher === "function" ? patcher(prev) : { ...prev, ...patcher });
+  const loadBackendData = async (token, userId) => {
+    const [income, expenses, budgets, goals, bills, notifications] = await Promise.all([
+      apiRequest("/finance/income/", {}, token),
+      apiRequest("/finance/expenses/", {}, token),
+      apiRequest("/finance/budgets/", {}, token),
+      apiRequest("/finance/savings-goals/", {}, token),
+      apiRequest("/finance/bills/", {}, token),
+      apiRequest("/finance/notifications/", {}, token)
+    ]);
+    patchState((prev) => ({
+      ...prev,
+      incomes: [...prev.incomes.filter((item) => item.userId !== userId), ...income.map(incomeFromApi)],
+      expenses: [...prev.expenses.filter((item) => item.userId !== userId), ...expenses.map(expenseFromApi)],
+      budgets: [...prev.budgets.filter((item) => item.userId !== userId), ...budgets.map(budgetFromApi)],
+      goals: [...prev.goals.filter((item) => item.userId !== userId), ...goals.map(goalFromApi)],
+      bills: [...prev.bills.filter((item) => item.userId !== userId), ...bills.map(billFromApi)],
+      notifications: [...notifications.map((item) => ({ id: item.id, userId: item.user, title: item.title, message: item.message, date: item.created_at, read: item.is_read })), ...prev.notifications.filter((item) => item.userId !== userId)]
+    }));
+  };
+  const backend = {
+    register: (payload) => apiRequest("/auth/register/", { method: "POST", body: JSON.stringify(payload) }),
+    login: (payload) => apiRequest("/auth/login/", { method: "POST", body: JSON.stringify(payload) }),
+    forgot: (payload) => apiRequest("/auth/forgot-password/", { method: "POST", body: JSON.stringify(payload) }),
+    verifyOtp: (payload) => apiRequest("/auth/verify-otp/", { method: "POST", body: JSON.stringify(payload) }),
+    resetPassword: (payload) => apiRequest("/auth/reset-password/", { method: "POST", body: JSON.stringify(payload) }),
+    setupProfile: (payload) => apiRequest("/auth/profile/setup/", { method: "PATCH", body: JSON.stringify(payload) }, state.session?.token),
+    create: (path, payload) => apiRequest(path, { method: "POST", body: JSON.stringify(payload) }, state.session?.token),
+    update: (path, id, payload) => apiRequest(`${path}${id}/`, { method: "PATCH", body: JSON.stringify(payload) }, state.session?.token),
+    remove: (path, id) => apiRequest(`${path}${id}/`, { method: "DELETE" }, state.session?.token),
+    loadBackendData
+  };
   const notify = (message, type = "Info") => {
     const item = { id: uid("toast"), message, type };
     setToast((items) => [...items, item]);
@@ -84,18 +192,18 @@ function App() {
   return (
     <>
       {!currentUser && !state.adminSession ? (
-        <AuthPage state={state} patchState={patchState} authMode={authMode} setAuthMode={setAuthMode} notify={notify} />
+        <AuthPage state={state} patchState={patchState} authMode={authMode} setAuthMode={setAuthMode} notify={notify} backend={backend} />
       ) : needsSetup ? (
-        <SetupPage user={currentUser} patchState={patchState} notify={notify} logout={logout} />
+        <SetupPage user={currentUser} patchState={patchState} notify={notify} logout={logout} backend={backend} />
       ) : (
-        <Workspace state={state} patchState={patchState} user={currentUser} active={active} setActive={setActive} logout={logout} notify={notify} />
+        <Workspace state={state} patchState={patchState} user={currentUser} active={active} setActive={setActive} logout={logout} notify={notify} backend={backend} />
       )}
       <div className="toast-stack">{toast.map((item) => <div className="app-toast" key={item.id}><strong>{item.type}</strong><div>{item.message}</div></div>)}</div>
     </>
   );
 }
 
-function AuthPage({ state, patchState, authMode, setAuthMode, notify }) {
+function AuthPage({ state, patchState, authMode, setAuthMode, notify, backend }) {
   const [login, setLogin] = useState({ identifier: "", password: "", remember: true, otp: "" });
   const [register, setRegister] = useState({ fullName: "", username: "", email: "", phone: "", country: "", currency: "INR", password: "", confirm: "" });
   const [reset, setReset] = useState({ identifier: "", otpSent: false, otp: "", password: "", confirm: "" });
@@ -113,7 +221,7 @@ function AuthPage({ state, patchState, authMode, setAuthMode, notify }) {
     return Object.keys(next).length === 0;
   };
 
-  const submitRegister = (event) => {
+  const submitRegister = async (event) => {
     event.preventDefault();
     if (!validateRegister()) return;
     const user = {
@@ -129,12 +237,26 @@ function AuthPage({ state, patchState, authMode, setAuthMode, notify }) {
       blocked: false,
       createdAt: new Date().toISOString()
     };
-    patchState((prev) => ({ ...prev, users: [...prev.users, user] }));
+    try {
+      await backend.register({
+        full_name: register.fullName,
+        username: register.username,
+        email: register.email,
+        phone_number: register.phone,
+        country: register.country,
+        currency: register.currency,
+        password: register.password,
+        confirm_password: register.confirm
+      });
+    } catch (error) {
+      notify("Backend offline: account saved locally for frontend testing", "API Fallback");
+    }
+    patchState((prev) => prev.users.some((entry) => entry.email === user.email) ? prev : { ...prev, users: [...prev.users, user] });
     setAuthMode("login");
     notify("Account created. Please sign in.", "Registration");
   };
 
-  const submitLogin = (event) => {
+  const submitLogin = async (event) => {
     event.preventDefault();
     const user = state.users.find((entry) => (entry.email === login.identifier || entry.username === login.identifier) && entry.passwordHash === hashPassword(login.password));
     if (login.identifier === "admin" && login.password === "Admin@123") {
@@ -142,9 +264,24 @@ function AuthPage({ state, patchState, authMode, setAuthMode, notify }) {
       notify("Admin login successful", "Admin");
       return;
     }
-    if (!user || user.blocked) {
-      setErrors({ login: "Invalid credentials or blocked user" });
+    try {
+      const data = await backend.login({ identifier: login.identifier, password: login.password, remember_me: login.remember });
+      const apiUser = apiUserToLocal(data.user);
+      patchState((prev) => ({
+        ...prev,
+        users: prev.users.some((entry) => entry.id === apiUser.id) ? prev.users.map((entry) => entry.id === apiUser.id ? apiUser : entry) : [...prev.users, apiUser],
+        session: { userId: apiUser.id, token: data.tokens.access, refresh: data.tokens.refresh, remember: login.remember, startedAt: new Date().toISOString() },
+        loginHistory: [{ id: uid("login"), userId: apiUser.id, date: new Date().toLocaleString(), device: navigator.userAgent.slice(0, 70) }, ...prev.loginHistory]
+      }));
+      await backend.loadBackendData(data.tokens.access, apiUser.id);
+      notify("JWT session started from Django API", "Login");
       return;
+    } catch (error) {
+      notify("Backend login unavailable, trying local session", "API Fallback");
+      if (!user || user.blocked) {
+        setErrors({ login: "Invalid credentials or blocked user" });
+        return;
+      }
     }
     const token = `jwt.${btoa(user.id)}.${Date.now()}`;
     patchState((prev) => ({
@@ -155,16 +292,32 @@ function AuthPage({ state, patchState, authMode, setAuthMode, notify }) {
     notify("JWT session started", "Login");
   };
 
-  const submitReset = (event) => {
+  const submitReset = async (event) => {
     event.preventDefault();
     if (!reset.otpSent) {
+      try {
+        const result = await backend.forgot({ identifier: reset.identifier });
+        setReset({ ...reset, otpSent: true, otp: result.demo_otp || "" });
+        notify(`OTP generated${result.demo_otp ? `: ${result.demo_otp}` : ""}`, "OTP Verification");
+        return;
+      } catch (error) {
+        notify("Backend OTP unavailable, using demo OTP", "API Fallback");
+      }
       setReset({ ...reset, otpSent: true, otp: "123456" });
       notify("Demo OTP generated: 123456", "OTP Verification");
       return;
     }
     if (reset.otp !== "123456" || reset.password.length < 8 || reset.password !== reset.confirm) {
-      setErrors({ reset: "Check OTP and password confirmation" });
-      return;
+      try {
+        await backend.verifyOtp({ identifier: reset.identifier, otp: reset.otp });
+        await backend.resetPassword({ identifier: reset.identifier, otp: reset.otp, password: reset.password, confirm_password: reset.confirm });
+        setAuthMode("login");
+        notify("Password reset complete", "Security");
+        return;
+      } catch (error) {
+        setErrors({ reset: "Check OTP and password confirmation" });
+        return;
+      }
     }
     patchState((prev) => ({
       ...prev,
@@ -239,13 +392,28 @@ function AuthPage({ state, patchState, authMode, setAuthMode, notify }) {
   );
 }
 
-function SetupPage({ user, patchState, notify, logout }) {
+function SetupPage({ user, patchState, notify, logout, backend }) {
   const [form, setForm] = useState({ monthlySalary: "", salaryDate: todayISO(), monthlyBudget: "", dailyBudget: "", savingsGoal: "", preferredCurrency: user.currency, defaultPayment: "UPI", financialGoal: "" });
-  const complete = (event) => {
+  const complete = async (event) => {
     event.preventDefault();
     if (Object.values(form).some((value) => !value)) {
       notify("Complete every setup field before opening the dashboard", "Profile Setup");
       return;
+    }
+    try {
+      await backend.setupProfile({
+        monthly_salary: form.monthlySalary,
+        salary_credit_date: form.salaryDate,
+        monthly_budget: form.monthlyBudget,
+        daily_budget: form.dailyBudget,
+        savings_goal: form.savingsGoal,
+        preferred_currency: form.preferredCurrency,
+        default_payment_method: form.defaultPayment,
+        financial_goal: form.financialGoal
+      });
+      notify("Profile setup saved to Django/MySQL API", "Profile Setup");
+    } catch (error) {
+      notify("Backend setup unavailable, saved locally", "API Fallback");
     }
     patchState((prev) => ({
       ...prev,
@@ -281,7 +449,7 @@ function SetupPage({ user, patchState, notify, logout }) {
 }
 
 function Workspace(props) {
-  const { state, patchState, user, active, setActive, logout, notify } = props;
+  const { state, patchState, user, active, setActive, logout, notify, backend } = props;
   const nav = [
     ["dashboard", "fa-gauge-high", "Dashboard"], ["income", "fa-arrow-trend-up", "Income"], ["expenses", "fa-receipt", "Expenses"],
     ["budgets", "fa-chart-pie", "Budgets"], ["goals", "fa-bullseye", "Savings Goals"], ["recurring", "fa-repeat", "Recurring"],
@@ -289,7 +457,7 @@ function Workspace(props) {
     ["analytics", "fa-chart-line", "Analytics"], ["ai", "fa-wand-magic-sparkles", "AI Insights"], ["profile", "fa-user-gear", "Profile"],
     ["settings", "fa-gear", "Settings"], ["admin", "fa-user-shield", "Admin"]
   ];
-  const componentProps = { state, patchState, user, notify };
+  const componentProps = { state, patchState, user, notify, backend };
   const pages = {
     dashboard: <Dashboard {...componentProps} />,
     income: <MoneyModule key="income" {...componentProps} type="income" />,
@@ -369,7 +537,7 @@ function Dashboard({ state, user }) {
   );
 }
 
-function MoneyModule({ state, patchState, user, notify, type }) {
+function MoneyModule({ state, patchState, user, notify, type, backend }) {
   const isIncome = type === "income";
   const key = isIncome ? "incomes" : "expenses";
   const initial = isIncome
@@ -383,17 +551,35 @@ function MoneyModule({ state, patchState, user, notify, type }) {
     const blob = JSON.stringify(item).toLowerCase();
     return (!filter.q || blob.includes(filter.q.toLowerCase())) && (filter.category === "All" || item.category === filter.category) && (filter.month === "All" || item.date?.startsWith(filter.month)) && (!filter.amount || Number(item.amount) <= Number(filter.amount));
   });
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
     if (!form.amount || Number(form.amount) <= 0) return notify("Amount is required", isIncome ? "Income" : "Expense");
-    const item = { ...form, id: editing || uid(key), userId: user.id, amount: Number(form.amount) };
+    let item = { ...form, id: editing || uid(key), userId: user.id, amount: Number(form.amount) };
+    try {
+      if (isIncome) {
+        const payload = { income_source: form.source, amount: form.amount, date: form.date, payment_method_name: form.payment, description: form.description };
+        const saved = editing ? await backend.update("/finance/income/", editing, payload) : await backend.create("/finance/income/", payload);
+        item = incomeFromApi(saved);
+      } else {
+        const payload = { amount: form.amount, category_name: form.category, sub_category_name: form.subCategory, date: form.date, time: form.time, payment_method_name: form.payment, merchant_name: form.merchant, notes: form.notes, location: form.location };
+        const saved = editing ? await backend.update("/finance/expenses/", editing, payload) : await backend.create("/finance/expenses/", payload);
+        item = expenseFromApi(saved);
+      }
+    } catch (error) {
+      notify("Backend save unavailable, record saved locally", "API Fallback");
+    }
     patchState((prev) => ({ ...prev, [key]: editing ? prev[key].map((row) => row.id === editing ? item : row) : [item, ...prev[key]] }));
     notify(`${isIncome ? "Income" : "Expense"} ${editing ? "updated" : "added"}`, isIncome ? "Income" : "Expense");
     setEditing(null);
     setForm(initial);
   };
   const edit = (item) => { setEditing(item.id); setForm(item); };
-  const remove = (id) => {
+  const remove = async (id) => {
+    try {
+      await backend.remove(isIncome ? "/finance/income/" : "/finance/expenses/", id);
+    } catch (error) {
+      notify("Backend delete unavailable, removed locally", "API Fallback");
+    }
     patchState((prev) => ({ ...prev, [key]: prev[key].filter((item) => item.id !== id) }));
     notify(`${isIncome ? "Income" : "Expense"} deleted`, isIncome ? "Income" : "Expense");
   };
@@ -441,14 +627,21 @@ function MoneyModule({ state, patchState, user, notify, type }) {
   );
 }
 
-function BudgetModule({ state, patchState, user, notify }) {
+function BudgetModule({ state, patchState, user, notify, backend }) {
   const [form, setForm] = useState({ type: "Monthly", category: "All", amount: "" });
   const { totalExpenses } = useUserData(state, user);
   const budgets = state.budgets.filter((item) => item.userId === user.id);
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
     if (!form.amount) return;
-    patchState((prev) => ({ ...prev, budgets: [{ ...form, id: uid("budget"), userId: user.id, amount: Number(form.amount) }, ...prev.budgets] }));
+    let item = { ...form, id: uid("budget"), userId: user.id, amount: Number(form.amount) };
+    try {
+      const saved = await backend.create("/finance/budgets/", { period: form.type.toLowerCase(), category_name: form.category, amount: form.amount });
+      item = budgetFromApi(saved);
+    } catch (error) {
+      notify("Backend budget unavailable, saved locally", "API Fallback");
+    }
+    patchState((prev) => ({ ...prev, budgets: [item, ...prev.budgets] }));
     notify("Budget saved", "Budget");
     setForm({ type: "Monthly", category: "All", amount: "" });
   };
@@ -475,36 +668,57 @@ function BudgetModule({ state, patchState, user, notify }) {
   );
 }
 
-function GoalsModule({ state, patchState, user, notify }) {
+function GoalsModule({ state, patchState, user, notify, backend }) {
   const [form, setForm] = useState({ name: "", target: "", current: "", deadline: "", priority: "Medium" });
   const goals = state.goals.filter((item) => item.userId === user.id);
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
     if (!form.name || !form.target || !form.deadline) return;
-    patchState((prev) => ({ ...prev, goals: [{ ...form, id: uid("goal"), userId: user.id, target: Number(form.target), current: Number(form.current || 0) }, ...prev.goals] }));
+    let item = { ...form, id: uid("goal"), userId: user.id, target: Number(form.target), current: Number(form.current || 0) };
+    try {
+      const saved = await backend.create("/finance/savings-goals/", { goal_name: form.name, target_amount: form.target, current_saved_amount: form.current || 0, deadline: form.deadline, priority: form.priority.toLowerCase() });
+      item = goalFromApi(saved);
+    } catch (error) {
+      notify("Backend goal unavailable, saved locally", "API Fallback");
+    }
+    patchState((prev) => ({ ...prev, goals: [item, ...prev.goals] }));
     notify("Savings goal created", "Goal");
     setForm({ name: "", target: "", current: "", deadline: "", priority: "Medium" });
   };
   return <SimpleCreateList title="Savings Goal Module" subtitle="Create goals with priority, deadline, percentage, remaining amount, and days left." form={form} setForm={setForm} submit={submit} items={goals} user={user} kind="goal" />;
 }
 
-function RecurringModule({ state, patchState, user, notify }) {
+function RecurringModule({ state, patchState, user, notify, backend }) {
   const [form, setForm] = useState({ name: "", amount: "", frequency: "Monthly", type: "Expense", nextDate: todayISO() });
   const items = state.recurring.filter((item) => item.userId === user.id);
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    patchState((prev) => ({ ...prev, recurring: [{ ...form, id: uid("rec"), userId: user.id, amount: Number(form.amount) }, ...prev.recurring] }));
+    let item = { ...form, id: uid("rec"), userId: user.id, amount: Number(form.amount) };
+    try {
+      const saved = await backend.create("/finance/recurring-transactions/", { name: form.name, amount: form.amount, transaction_type: form.type.toLowerCase(), frequency: form.frequency.toLowerCase(), next_run_date: form.nextDate });
+      item = { id: saved.id, userId: saved.user, name: saved.name, amount: Number(saved.amount), type: saved.transaction_type, frequency: saved.frequency, nextDate: saved.next_run_date };
+    } catch (error) {
+      notify("Backend recurring unavailable, saved locally", "API Fallback");
+    }
+    patchState((prev) => ({ ...prev, recurring: [item, ...prev.recurring] }));
     notify("Recurring reminder created", "Recurring");
   };
   return <SimpleCreateList title="Recurring Transactions" subtitle="Salary, rent, EMI, electricity, water, internet, Netflix, Spotify and more." form={form} setForm={setForm} submit={submit} items={items} user={user} kind="recurring" />;
 }
 
-function BillsModule({ state, patchState, user, notify }) {
+function BillsModule({ state, patchState, user, notify, backend }) {
   const [form, setForm] = useState({ name: "", amount: "", dueDate: todayISO(), remindBefore: "3" });
   const items = state.bills.filter((item) => item.userId === user.id);
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    patchState((prev) => ({ ...prev, bills: [{ ...form, id: uid("bill"), userId: user.id, amount: Number(form.amount) }, ...prev.bills] }));
+    let item = { ...form, id: uid("bill"), userId: user.id, amount: Number(form.amount) };
+    try {
+      const saved = await backend.create("/finance/bills/", { bill_name: form.name, amount: form.amount, due_date: form.dueDate, reminder_days_before_due_date: form.remindBefore });
+      item = billFromApi(saved);
+    } catch (error) {
+      notify("Backend bill unavailable, saved locally", "API Fallback");
+    }
+    patchState((prev) => ({ ...prev, bills: [item, ...prev.bills] }));
     notify("Bill reminder saved", "Bill Reminder");
   };
   return <SimpleCreateList title="Bills Reminder" subtitle="Get notified before due dates." form={form} setForm={setForm} submit={submit} items={items} user={user} kind="bill" />;
