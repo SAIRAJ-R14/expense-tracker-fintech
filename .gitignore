@@ -15,6 +15,12 @@ db.sqlite3
 media/
 staticfiles/
 .env
+backend/mysql-data/
+backend/mysql-project.ini
+backend/server.log
+backend/server.err.log
+backend/mysql-server.log
+backend/mysql-server.err.log
 
 # Node/frontend
 node_modules/
